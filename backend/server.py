@@ -73,6 +73,41 @@ class SearchResponse(BaseModel):
     sources_count: int
     error: Optional[str] = None
 
+
+# Quote models
+class Person(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Quote(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    person_id: str
+    text: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class QuoteResponse(BaseModel):
+    id: str
+    person_name: str
+    person_description: Optional[str]
+    text: str
+    person_image_url: Optional[str] = None
+
+
+class PersonCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+
+
+class QuoteCreate(BaseModel):
+    person_id: str
+    text: str
+
 # Routes
 @api_router.get("/")
 async def root():
@@ -89,6 +124,136 @@ async def create_status_check(input: StatusCheckCreate):
 async def get_status_checks():
     status_checks = await db.status_checks.find().to_list(1000)
     return [StatusCheck(**status_check) for status_check in status_checks]
+
+
+# Quote routes
+@api_router.get("/people", response_model=List[Person])
+async def get_people():
+    people = await db.people.find().to_list(1000)
+    return [Person(**person) for person in people]
+
+
+@api_router.post("/people", response_model=Person)
+async def create_person(person_data: PersonCreate):
+    person_dict = person_data.dict()
+    person_obj = Person(**person_dict)
+    await db.people.insert_one(person_obj.dict())
+    return person_obj
+
+
+@api_router.get("/quotes", response_model=List[QuoteResponse])
+async def get_quotes():
+    # Join quotes with people data
+    pipeline = [
+        {
+            "$lookup": {
+                "from": "people",
+                "localField": "person_id",
+                "foreignField": "id",
+                "as": "person"
+            }
+        },
+        {
+            "$unwind": "$person"
+        },
+        {
+            "$project": {
+                "id": 1,
+                "text": 1,
+                "person_name": "$person.name",
+                "person_description": "$person.description",
+                "person_image_url": "$person.image_url"
+            }
+        }
+    ]
+
+    quotes = await db.quotes.aggregate(pipeline).to_list(1000)
+    return [QuoteResponse(**quote) for quote in quotes]
+
+
+@api_router.get("/quotes/person/{person_id}", response_model=List[QuoteResponse])
+async def get_quotes_by_person(person_id: str):
+    # Get quotes for specific person
+    pipeline = [
+        {
+            "$match": {"person_id": person_id}
+        },
+        {
+            "$lookup": {
+                "from": "people",
+                "localField": "person_id",
+                "foreignField": "id",
+                "as": "person"
+            }
+        },
+        {
+            "$unwind": "$person"
+        },
+        {
+            "$project": {
+                "id": 1,
+                "text": 1,
+                "person_name": "$person.name",
+                "person_description": "$person.description",
+                "person_image_url": "$person.image_url"
+            }
+        }
+    ]
+
+    quotes = await db.quotes.aggregate(pipeline).to_list(1000)
+    return [QuoteResponse(**quote) for quote in quotes]
+
+
+@api_router.get("/quotes/random", response_model=QuoteResponse)
+async def get_random_quote(person_id: Optional[str] = None):
+    # Get random quote, optionally filtered by person
+    match_stage = {}
+    if person_id:
+        match_stage["person_id"] = person_id
+
+    pipeline = [
+        {"$match": match_stage},
+        {"$sample": {"size": 1}},
+        {
+            "$lookup": {
+                "from": "people",
+                "localField": "person_id",
+                "foreignField": "id",
+                "as": "person"
+            }
+        },
+        {
+            "$unwind": "$person"
+        },
+        {
+            "$project": {
+                "id": 1,
+                "text": 1,
+                "person_name": "$person.name",
+                "person_description": "$person.description",
+                "person_image_url": "$person.image_url"
+            }
+        }
+    ]
+
+    quotes = await db.quotes.aggregate(pipeline).to_list(1)
+    if not quotes:
+        raise HTTPException(status_code=404, detail="No quotes found")
+
+    return QuoteResponse(**quotes[0])
+
+
+@api_router.post("/quotes", response_model=Quote)
+async def create_quote(quote_data: QuoteCreate):
+    # Verify person exists
+    person = await db.people.find_one({"id": quote_data.person_id})
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+
+    quote_dict = quote_data.dict()
+    quote_obj = Quote(**quote_dict)
+    await db.quotes.insert_one(quote_obj.dict())
+    return quote_obj
 
 
 # AI agent routes
